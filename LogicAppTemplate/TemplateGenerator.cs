@@ -3,12 +3,15 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Web;
+using System.Web.UI.WebControls;
 
 namespace LogicAppTemplate
 {
@@ -457,6 +460,7 @@ namespace LogicAppTemplate
 
                     aaid.SubscriptionId = "',subscription().subscriptionId,'";
                     aaid.ResourceGroupName = "', parameters('" + AddTemplateParameter("apimResourceGroup", "string", aaid.ResourceGroupName) + "'),'";
+
                     aaid.ReplaceValueAfter("service", "', parameters('" + AddTemplateParameter("apimInstanceName", "string", aaid.ValueAfter("service")) + "'),'");
                     aaid.ReplaceValueAfter("apis", "', parameters('" + AddTemplateParameter($"api_{aaid.ValueAfter("apis")}_name", "string", aaid.ValueAfter("apis")) + "'),'");
                     apiId = "[concat('" + aaid.ToString() + "')]";
@@ -513,7 +517,7 @@ namespace LogicAppTemplate
                         {
                             //get hostname from apiDefinitionUrl
                             var apiDefinitionUri =
-                                new Uri(((JObject) definition["actions"][action.Name]["metadata"]).Value<string>(
+                                new Uri(((JObject)definition["actions"][action.Name]["metadata"]).Value<string>(
                                     "apiDefinitionUrl"));
                             var apiDefinitionHostname = apiDefinitionUri.GetLeftPart(UriPartial.Authority);
                             var apiDefinitionHostnameParam =
@@ -547,7 +551,7 @@ namespace LogicAppTemplate
                                 apiDefinitionUriPathAndQuery + ")]";
 
                             var apiUri =
-                                new Uri(((JObject) definition["actions"][action.Name]["inputs"]).Value<string>("uri"));
+                                new Uri(((JObject)definition["actions"][action.Name]["inputs"]).Value<string>("uri"));
                             var apiHostname = apiDefinitionUri.GetLeftPart(UriPartial.Authority);
                             var apiHostnameParam = apiDefinitionHostname == apiHostname
                                 ? apiDefinitionHostnameParam
@@ -558,7 +562,7 @@ namespace LogicAppTemplate
                             definition["actions"][action.Name]["inputs"]["uri"] = "[concat(parameters('" +
                                 apiHostnameParam + "'), '" + pathAndQuery + "')]";
                             AddTemplateParameter("__apostrophe", "string", "'");
-                        } 
+                        }
 
                         //only add when not parameterized yet
                         else if (!Regex.IsMatch(((JObject)definition["actions"][action.Name]["inputs"]).Value<string>("uri"), @"parameters\('.*'\)"))
@@ -639,25 +643,49 @@ namespace LogicAppTemplate
                 }
                 else if (type == "function")
                 {
-                    var curr = ((JObject)definition["actions"][action.Name]["inputs"]["function"]).Value<string>("id");
+                    var isFunctionApp = (JObject)definition["actions"][action.Name]["inputs"]["functionApp"] != null;
+
+
+                    var functionDefinition = isFunctionApp
+                        ? (JObject)definition["actions"][action.Name]["inputs"]["functionApp"]
+                        : (JObject)definition["actions"][action.Name]["inputs"]["function"];
+
+
+                    var curr = functionDefinition.Value<string>("id");
                     var faid = new AzureResourceId(curr);
 
                     var resourcegroupValue = LogicAppResourceGroup == faid.ResourceGroupName ? "[resourceGroup().name]" : faid.ResourceGroupName;
 
+                    var resourceGroupParameter = AddTemplateParameter((FixedFunctionAppName ? "FunctionApp-" : action.Name + "-") + "ResourceGroup", "string", resourcegroupValue);
 
                     faid.SubscriptionId = "',subscription().subscriptionId,'";
-                    faid.ResourceGroupName = "',parameters('" + AddTemplateParameter((FixedFunctionAppName ? "FunctionApp-" : action.Name + "-") + "ResourceGroup", "string", resourcegroupValue) + "'),'";
-                    faid.ReplaceValueAfter("sites", "',parameters('" + AddTemplateParameter((FixedFunctionAppName ? "" : action.Name + "-") + "FunctionApp", "string", faid.ValueAfter("sites")) + "'),'");
 
-                    if (DisableFunctionNameParameters)
+                    faid.ResourceGroupName = $"',parameters('{resourceGroupParameter}'),'";
+
+                    var functionParameterName = AddTemplateParameter((FixedFunctionAppName ? "" : action.Name + "-") + "FunctionApp", "string", faid.ValueAfter("sites"));
+
+                    if (isFunctionApp)
                     {
-                        faid.ReplaceValueAfter("functions", faid.ValueAfter("functions") + "'");
+                        faid.ReplaceValueAfter("sites", $"',parameters('{functionParameterName}')");
                     }
                     else
                     {
+                        faid.ReplaceValueAfter("sites", $"',parameters('{functionParameterName}'),'");
+                    
+                        if (DisableFunctionNameParameters)
+                        {
+                            faid.ReplaceValueAfter("functions", faid.ValueAfter("functions") + "'");
+                        }
                         faid.ReplaceValueAfter("functions", "',parameters('" + AddTemplateParameter((FixedFunctionAppName ? "" : action.Name + "-") + "FunctionName", "string", faid.ValueAfter("functions")) + "')");
                     }
-                    definition["actions"][action.Name]["inputs"]["function"]["id"] = "[concat('" + faid.ToString() + ")]";
+                    
+                    functionDefinition["id"] = "[concat('" + faid.ToString() + ")]";
+
+                    if (isFunctionApp)
+                    {
+                        var inputs = (JObject)definition["actions"][action.Name]["inputs"];
+                        inputs["uri"] = $"[parameters('{AddTemplateParameter(action.Name + "-Uri", "string", inputs.Value<string>("uri"))}')]";
+                    }
                 }
                 else
                 {
@@ -1149,6 +1177,9 @@ namespace LogicAppTemplate
             //parameterValueSet
             connectionTemplate.properties.parameterValueSet = connectionInstance["properties"]?["parameterValueSet"];
 
+            bool isKeyVaultConnectionUsingOauthMI = connectionInstance["properties"]?["parameterValueSet"]?["name"] != null
+                && connectionInstance["properties"]["parameterValueSet"]["name"].Value<string>()  == "oauthMI";
+
             JObject connectionParameters = new JObject();
 
             bool useGateway = connectionInstance["properties"]?["parameterValueSet"]?["values"]?["gateway"] != null ||
@@ -1161,149 +1192,162 @@ namespace LogicAppTemplate
             var instanceResourceId = new AzureResourceId(connectionInstance.Value<string>("id"));
 
             //add all parameters
-            if (connectionResource["properties"]["connectionParameters"] != null)
+            if (connectionResource["properties"]["connectionParameters"] != null && !isKeyVaultConnectionUsingOauthMI)
             {
                 foreach (JProperty parameter in connectionResource["properties"]["connectionParameters"])
                 {
-                    if ((string)(parameter.Value)["type"] != "oauthSetting")
+                    if ((string)(parameter.Value)["type"] == "oauthSetting")
+                        continue;
+
+                    //we are not handling parameter gatewaySetting
+                    if ((string)parameter.Value["type"] == "gatewaySetting")
+                        continue;
+
+                    if (parameter.Value["uiDefinition"]["constraints"]["capability"] != null)
                     {
-                        //we are not handling parameter gatewaySetting
-                        if ((string)parameter.Value["type"] == "gatewaySetting")
+                        var match = parameter.Value["uiDefinition"]["constraints"]["capability"].FirstOrDefault(cc => (string)cc == "gateway" && useGateway || (string)cc == "cloud" && !useGateway);
+                        if (match == null)
                             continue;
-                        if (parameter.Value["uiDefinition"]["constraints"]["capability"] != null)
+                    }
+
+                         if (OnlyParameterizeConnections == false && concatedId.EndsWith("/azureblob')]") && connectionInstance["properties"]["parameterValueSet"]?["name"].Value<string>() == "managedIdentityAuth")
+                    {
+                        //ignore
+                    }
+                    else if (OnlyParameterizeConnections == false && parameter.Name == "accessKey" && concatedId.EndsWith("/azureblob')]"))
+                    {
+                        //handle different resourceGroups
+
+                        connectionParameters.Add(parameter.Name, $"[listKeys(resourceId(parameters('{AddTemplateParameter(connectionName + "_resourceGroupName", "string", instanceResourceId.ResourceGroupName)}'),'Microsoft.Storage/storageAccounts', parameters('{connectionName}_accountName')), '2018-02-01').keys[0].value]");
+                    }
+                    else if (OnlyParameterizeConnections == false && concatedId.EndsWith("/azuretables')]") && connectionInstance["properties"]["parameterValueSet"]?["name"].Value<string>() == "managedIdentityAuth")
+                    {
+                        //ignore
+                    }
+                    else if (OnlyParameterizeConnections == false && parameter.Name == "sharedkey" && concatedId.EndsWith("/azuretables')]"))
+                    {
+                        //handle different resourceGroups
+
+                        connectionParameters.Add(parameter.Name, $"[listKeys(resourceId(parameters('{AddTemplateParameter(connectionName + "_resourceGroupName", "string", instanceResourceId.ResourceGroupName)}'),'Microsoft.Storage/storageAccounts', parameters('{connectionName}_storageaccount')), '2018-02-01').keys[0].value]");
+                    }
+                    else if (OnlyParameterizeConnections == false && (parameter.Name == "sharedkey" && concatedId.EndsWith("/azurequeues')]")))
+                    {
+                        connectionParameters.Add(parameter.Name, $"[listKeys(resourceId(parameters('{AddTemplateParameter(connectionName + "_resourceGroupName", "string", instanceResourceId.ResourceGroupName)}'),'Microsoft.Storage/storageAccounts', parameters('{connectionName}_storageaccount')), '2018-02-01').keys[0].value]");
+                    }
+                    else if (OnlyParameterizeConnections == false && concatedId.EndsWith("/servicebus')]") && connectionInstance["properties"]["parameterValueSet"]?["name"].Value<string>() == "managedIdentityAuth")
+                    {
+                        //Check for namespaceEndpoint property exist and is not null
+                        var namespaceEndpoint_param = AddTemplateParameter($"servicebus_namespaceEndpoint", "string", connectionInstance["properties"]?["parameterValueSet"]?["values"]?["namespaceEndpoint"]?["value"]);
+                        if (namespaceEndpoint_param != null)
                         {
-                            var match = parameter.Value["uiDefinition"]["constraints"]["capability"].FirstOrDefault(cc => (string)cc == "gateway" && useGateway || (string)cc == "cloud" && !useGateway);
-                            if (match == null)
-                                continue;
+                            connectionInstance["properties"]["parameterValueSet"]["values"]["namespaceEndpoint"]["value"] = $"[parameters('{namespaceEndpoint_param}')]";
+                        }
+                    }
+                    else if (OnlyParameterizeConnections == false && concatedId.EndsWith("/servicebus')]"))
+                    {
+                        var serviceBus_displayName = (string)connectionInstance["properties"]?["displayName"];
+                        if (string.IsNullOrEmpty(serviceBus_displayName) || !UseServiceBusDisplayName)
+                        {
+                            serviceBus_displayName = "servicebus";
                         }
 
-                        if (OnlyParameterizeConnections == false && concatedId.EndsWith("/azureblob')]") && connectionInstance["properties"]["parameterValueSet"]?["name"].Value<string>() == "managedIdentityAuth")
+                        var namespace_param = AddTemplateParameter($"{serviceBus_displayName}_namespace_name", "string", "REPLACE__servicebus_namespace");
+                        var sb_resource_group_param = AddTemplateParameter($"{serviceBus_displayName}_resourceGroupName", "string", "REPLACE__servicebus_rg");
+                        var servicebus_auth_name_param = AddTemplateParameter($"servicebus_accessKey_name", "string", "RootManageSharedAccessKey");
+
+                        connectionParameters.Add(parameter.Name, $"[listkeys(resourceId(parameters('{sb_resource_group_param}'),'Microsoft.ServiceBus/namespaces/authorizationRules', parameters('{namespace_param}'), parameters('{servicebus_auth_name_param}')), '2017-04-01').primaryConnectionString]");
+
+                    }
+                    else if (OnlyParameterizeConnections == false && concatedId.EndsWith("/azureeventgridpublish')]"))
+                    {
+                        var url = connectionInstance["properties"]["nonSecretParameterValues"].Value<string>("endpoint");
+                        var location = connectionInstance.Value<string>("location");
+                        url = url.Replace("https://", "");
+                        var site = url.Substring(0, url.IndexOf("."));
+
+                        var param = AddTemplateParameter($"{connectionInstance.Value<string>("name")}_instancename", "string", site);
+
+                        if (parameter.Name == "endpoint")
                         {
-                            //ignore
+                            connectionParameters.Add(parameter.Name, $"[reference(resourceId(parameters('{AddTemplateParameter(connectionName + "_resourceGroupName", "string", instanceResourceId.ResourceGroupName)}'),'Microsoft.EventGrid/topics',parameters('{param}')),'2018-01-01').endpoint]");
                         }
-                        else if (OnlyParameterizeConnections == false && parameter.Name == "accessKey" && concatedId.EndsWith("/azureblob')]"))
+                        else if (parameter.Name == "api_key")
                         {
-                            //handle different resourceGroups
-
-                            connectionParameters.Add(parameter.Name, $"[listKeys(resourceId(parameters('{AddTemplateParameter(connectionName + "_resourceGroupName", "string", instanceResourceId.ResourceGroupName)}'),'Microsoft.Storage/storageAccounts', parameters('{connectionName}_accountName')), '2018-02-01').keys[0].value]");
+                            connectionParameters.Add(parameter.Name, $"[listKeys(resourceId(parameters('{AddTemplateParameter(connectionName + "_resourceGroupName", "string", instanceResourceId.ResourceGroupName)}'),'Microsoft.EventGrid/topics',parameters('{param}')),'2018-01-01').key1]");
                         }
-                        else if (OnlyParameterizeConnections == false && concatedId.EndsWith("/azuretables')]") && connectionInstance["properties"]["parameterValueSet"]?["name"].Value<string>() == "managedIdentityAuth")
+
+
+                    }
+                    //check for the existence of token:TenantId to determine the connectoins uses Oauth
+                    else if (SkipOauthConnectionAuthorization && parameter.Name.Equals("token:TenantId"))
+                    {
+                        //skip because otherwise authenticated connection has to be authenticated again.
+                    }
+                    else
+                    {
+                        //todo check this!
+                        object parameterValue = null;
+                        if (parameter.Name.Equals("token:TenantId"))
                         {
-                            //ignore
+                            parameterValue = "[subscription().tenantId]";
                         }
-                        else if (OnlyParameterizeConnections == false && parameter.Name == "sharedkey" && concatedId.EndsWith("/azuretables')]"))
+                        else if (!parameter.Name.StartsWith("token:") && (parameter.Value["uiDefinition"]["constraints"]["hidden"]?.Value<bool>() ?? false))
                         {
-                            //handle different resourceGroups
-
-                            connectionParameters.Add(parameter.Name, $"[listKeys(resourceId(parameters('{AddTemplateParameter(connectionName + "_resourceGroupName", "string", instanceResourceId.ResourceGroupName)}'),'Microsoft.Storage/storageAccounts', parameters('{connectionName}_storageaccount')), '2018-02-01').keys[0].value]");
+                            //check for hidden constraint do not skip token parameters for client credential services like eventgrid
+                            continue;
                         }
-                        else if (OnlyParameterizeConnections == false && (parameter.Name == "sharedkey" && concatedId.EndsWith("/azurequeues')]")))
+                        else if (connectionInstance["properties"]["nonSecretParameterValues"] != null)
                         {
-                            connectionParameters.Add(parameter.Name, $"[listKeys(resourceId(parameters('{AddTemplateParameter(connectionName + "_resourceGroupName", "string", instanceResourceId.ResourceGroupName)}'),'Microsoft.Storage/storageAccounts', parameters('{connectionName}_storageaccount')), '2018-02-01').keys[0].value]");
+                            parameterValue = connectionInstance["properties"]["nonSecretParameterValues"][parameter.Name];
                         }
-                        else if (OnlyParameterizeConnections == false && concatedId.EndsWith("/servicebus')]") && connectionInstance["properties"]["parameterValueSet"]?["name"].Value<string>() == "managedIdentityAuth")
+                        else if (concatedId.EndsWith("/managedApis/sql')]") && parameter.Name == "authType")
                         {
-                            //Check for namespaceEndpoint property exist and is not null
-                            var namespaceEndpoint_param = AddTemplateParameter($"servicebus_namespaceEndpoint", "string", connectionInstance["properties"]?["parameterValueSet"]?["values"]?["namespaceEndpoint"]?["value"]);
-                            if (namespaceEndpoint_param != null)
-                            {
-                                connectionInstance["properties"]["parameterValueSet"]["values"]["namespaceEndpoint"]["value"] = $"[parameters('{namespaceEndpoint_param}')]";
-                            }
-                        }
-                        else if (OnlyParameterizeConnections == false && concatedId.EndsWith("/servicebus')]"))
-                        {
-                            var serviceBus_displayName = (string)connectionInstance["properties"]?["displayName"];
-                            if (string.IsNullOrEmpty(serviceBus_displayName) || !UseServiceBusDisplayName)
-                            {
-                                serviceBus_displayName = "servicebus";
-                            }
-
-                            var namespace_param = AddTemplateParameter($"{serviceBus_displayName}_namespace_name", "string", "REPLACE__servicebus_namespace");
-                            var sb_resource_group_param = AddTemplateParameter($"{serviceBus_displayName}_resourceGroupName", "string", "REPLACE__servicebus_rg");
-                            var servicebus_auth_name_param = AddTemplateParameter($"servicebus_accessKey_name", "string", "RootManageSharedAccessKey");
-
-                            connectionParameters.Add(parameter.Name, $"[listkeys(resourceId(parameters('{sb_resource_group_param}'),'Microsoft.ServiceBus/namespaces/authorizationRules', parameters('{namespace_param}'), parameters('{servicebus_auth_name_param}')), '2017-04-01').primaryConnectionString]");
-
-                        }
-                        else if (OnlyParameterizeConnections == false && concatedId.EndsWith("/azureeventgridpublish')]"))
-                        {
-                            var url = connectionInstance["properties"]["nonSecretParameterValues"].Value<string>("endpoint");
-                            var location = connectionInstance.Value<string>("location");
-                            url = url.Replace("https://", "");
-                            var site = url.Substring(0, url.IndexOf("."));
-
-                            var param = AddTemplateParameter($"{connectionInstance.Value<string>("name")}_instancename", "string", site);
-
-                            if (parameter.Name == "endpoint")
-                            {
-                                connectionParameters.Add(parameter.Name, $"[reference(resourceId(parameters('{AddTemplateParameter(connectionName + "_resourceGroupName", "string", instanceResourceId.ResourceGroupName)}'),'Microsoft.EventGrid/topics',parameters('{param}')),'2018-01-01').endpoint]");
-                            }
-                            else if (parameter.Name == "api_key")
-                            {
-                                connectionParameters.Add(parameter.Name, $"[listKeys(resourceId(parameters('{AddTemplateParameter(connectionName + "_resourceGroupName", "string", instanceResourceId.ResourceGroupName)}'),'Microsoft.EventGrid/topics',parameters('{param}')),'2018-01-01').key1]");
-                            }
-
-
-                        }
-                        //check for the existence of token:TenantId to determine the connectoins uses Oauth
-                        else if (SkipOauthConnectionAuthorization && parameter.Name.Equals("token:TenantId"))
-                        {
-                            //skip because otherwise authenticated connection has to be authenticated again.
+                            var parameterName = connectionInstance["properties"]["parameterValueSet"]?["name"].Value<string>();
+                            parameterValue = (parameterName == "windowsAuthentication") ? "windows" : "basic";
                         }
                         else
                         {
-                            //todo check this!
-                            object parameterValue = null;
-                            if (parameter.Name.Equals("token:TenantId"))
-                            {
-                                parameterValue = "[subscription().tenantId]";
-                            }
+                            parameterValue = connectionInstance["properties"]["parameterValueSet"]?["values"]?[parameter.Name]?["value"];
+                        }
 
-                            //check for hidden constraint do not skip token parameters for client credential services like eventgrid
-                            else if (!parameter.Name.StartsWith("token:") && (parameter.Value["uiDefinition"]["constraints"]["hidden"]?.Value<bool>() ?? false))
-                            {
-                                continue;
-                            }
-                            else if (connectionInstance["properties"]["nonSecretParameterValues"] != null)
-                            {
-                                parameterValue = connectionInstance["properties"]["nonSecretParameterValues"][parameter.Name];
-                            }
-                            else if (concatedId.EndsWith("/managedApis/sql')]") && parameter.Name == "authType")
-                            {
-                                var parameterName = connectionInstance["properties"]["parameterValueSet"]?["name"].Value<string>();
-                                parameterValue = (parameterName == "windowsAuthentication") ? "windows" : "basic";
-                            }
-                            else
-                            {
-                                parameterValue = connectionInstance["properties"]["parameterValueSet"]?["values"]?[parameter.Name]?["value"];
-                            }
+                        var addedparam = AddTemplateParameter($"{connectionName}_{parameter.Name}", (string)(parameter.Value)["type"], parameterValue);
+                        connectionParameters.Add(parameter.Name, $"[parameters('{addedparam}')]");
 
-                            var addedparam = AddTemplateParameter($"{connectionName}_{parameter.Name}", (string)(parameter.Value)["type"], parameterValue);
-                            connectionParameters.Add(parameter.Name, $"[parameters('{addedparam}')]");
-
-                            //If has an enum
-                            if (parameter.Value["allowedValues"] != null)
+                        //If has an enum
+                        if (parameter.Value["allowedValues"] != null)
+                        {
+                            var array = new JArray();
+                            foreach (var allowedValue in parameter.Value["allowedValues"])
                             {
-                                var array = new JArray();
-                                foreach (var allowedValue in parameter.Value["allowedValues"])
-                                {
-                                    array.Add(allowedValue["value"].Value<string>().Replace("none", "anonymous"));
-                                }
-                                template.parameters[addedparam]["allowedValues"] = array;
-                                if (parameter.Value["allowedValues"].Count() == 1)
-                                {
-                                    template.parameters[addedparam]["defaultValue"] = parameter.Value["allowedValues"][0]["value"].Value<string>().Replace("none", "anonymous");
-                                }
+                                array.Add(allowedValue["value"].Value<string>().Replace("none", "anonymous"));
                             }
-
-                            if (parameter.Value["uiDefinition"]["description"] != null)
+                            template.parameters[addedparam]["allowedValues"] = array;
+                            if (parameter.Value["allowedValues"].Count() == 1)
                             {
-                                //add meta data
-                                template.parameters[addedparam]["metadata"] = new JObject();
-                                template.parameters[addedparam]["metadata"]["description"] = parameter.Value["uiDefinition"]["description"];
+                                template.parameters[addedparam]["defaultValue"] = parameter.Value["allowedValues"][0]["value"].Value<string>().Replace("none", "anonymous");
                             }
                         }
+
+                        if (parameter.Value["uiDefinition"]["description"] != null)
+                        {
+                            //add meta data
+                            template.parameters[addedparam]["metadata"] = new JObject();
+                            template.parameters[addedparam]["metadata"]["description"] = parameter.Value["uiDefinition"]["description"];
+                        }
                     }
+                }
+                
+            }
+
+            if (isKeyVaultConnectionUsingOauthMI)
+            {
+                foreach(JProperty property in connectionInstance["properties"]["parameterValueSet"]["values"])
+                {
+                    var propertyValue = (property.Value).Value<string>("value");
+                    var propertyName = property.Name;
+                    var propertyType = property?.Value?["type"] ?? "string";
+                    var addedparam = AddTemplateParameter($"{connectionName}_{propertyName}", (string)(property.Value)["type"] ?? "string", propertyValue);
+                    property.Value = $"[parameters('{addedparam}')]";
                 }
             }
 
@@ -1340,6 +1384,8 @@ namespace LogicAppTemplate
             //only fill connectionParameters when source not empty, otherwise saved credentials will be lost.
             if (connectionParameters.HasValues)
                 connectionTemplate.properties.parameterValues = connectionParameters;
+
+            
 
             return JObject.FromObject(connectionTemplate);
         }
