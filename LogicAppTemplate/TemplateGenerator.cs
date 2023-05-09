@@ -1246,9 +1246,14 @@ namespace LogicAppTemplate
                     else if (OnlyParameterizeConnections == false && concatedId.EndsWith("/servicebus')]"))
                     {
                         var serviceBus_displayName = (string)connectionInstance["properties"]?["displayName"];
+
                         if (string.IsNullOrEmpty(serviceBus_displayName) || !UseServiceBusDisplayName)
                         {
-                            serviceBus_displayName = "servicebus";
+                            serviceBus_displayName = (string)connectionInstance["name"];
+                            if (string.IsNullOrEmpty(serviceBus_displayName))
+                            {
+                                serviceBus_displayName = "servicebus";
+                            }
                         }
 
                         var namespace_param = AddTemplateParameter($"{serviceBus_displayName}_namespace_name", "string", "REPLACE__servicebus_namespace");
@@ -1341,13 +1346,16 @@ namespace LogicAppTemplate
 
             if (isKeyVaultConnectionUsingOauthMI)
             {
-                foreach(JProperty property in connectionInstance["properties"]["parameterValueSet"]["values"])
+                foreach(JProperty outerProperty in connectionInstance["properties"]["parameterValueSet"]["values"])
                 {
-                    var propertyValue = (property.Value).Value<string>("value");
-                    var propertyName = property.Name;
-                    var propertyType = property?.Value?["type"] ?? "string";
-                    var addedparam = AddTemplateParameter($"{connectionName}_{propertyName}", (string)(property.Value)["type"] ?? "string", propertyValue);
-                    property.Value = $"[parameters('{addedparam}')]";
+                    if (outerProperty.Name == "vaultName")
+                    {
+                        var property = outerProperty.Value["value"] as JValue;
+                        var propertyValueAsString = property.Value<string>();
+                        var propertyType = property.Type;
+                        var addedparam = AddTemplateParameter($"{connectionName}_vaultName", propertyType.ToString(), propertyValueAsString);
+                        property.Value = $"[parameters('{addedparam}')]";
+                    }
                 }
             }
 
