@@ -3,9 +3,12 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Data.Common;
+using System.Diagnostics.Metrics;
 using System.IO;
 using System.Linq;
+using System.Management.Automation;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -143,6 +146,9 @@ namespace LogicAppTemplate
             }
 
             workflowTemplateReference["properties"]["definition"] = handleActions(def, (JObject)definition["properties"]["parameters"]);
+            
+            if (definition["properties"]["accessControl"] != null)
+                workflowTemplateReference["properties"]["accessControl"] = handlePolicies((JObject)definition["properties"]["accessControl"]);
 
             if (definition.ContainsKey("tags"))
             {
@@ -329,6 +335,54 @@ namespace LogicAppTemplate
 
             // WriteVerbose("Finalizing Template...");
             return JObject.FromObject(template);
+        }
+
+        private JToken handlePolicies(JObject accessCtrlDefinition)
+        {
+            if (accessCtrlDefinition["triggers"] == null
+                || accessCtrlDefinition["triggers"]["openAuthenticationPolicies"] == null
+                || accessCtrlDefinition["triggers"]["openAuthenticationPolicies"]["policies"] == null
+                )
+                return accessCtrlDefinition;
+
+            var oldPolicyRoot = accessCtrlDefinition["triggers"]["openAuthenticationPolicies"]["policies"];
+            var policyCounter = 1;
+            var newPolicyRoot = new JObject();
+            oldPolicyRoot.Replace(newPolicyRoot);
+
+            foreach (JProperty policy in oldPolicyRoot)
+            {
+                if (policy.Value["type"].Value<string>() != "AAD") {
+                    newPolicyRoot.Add(policy);
+                    continue;
+                }
+                
+                var parameterNamePrefix = $"policy{policyCounter++}";
+                var parameterName_Policy = ToParameterString(AddTemplateParameter($"{parameterNamePrefix}-name", "string", policy.Name));
+
+                var parameterizedPolicy = new JProperty(parameterName_Policy);
+                newPolicyRoot.Add(parameterizedPolicy);
+                
+                parameterizedPolicy.Value = policy.Value;
+
+                var claims = parameterizedPolicy.Value["claims"];
+                var claimCounter = 1;
+                foreach (var claim in claims)
+                {
+                    var claimParameterNamePrefix = $"{parameterNamePrefix}-claim{claimCounter++}";
+                    var parameterName_ClaimName = ToParameterString(AddTemplateParameter($"{claimParameterNamePrefix}-name", "string", claim["name"]));
+                    var parameterName_ClaimValue = ToParameterString(AddTemplateParameter($"{claimParameterNamePrefix}-value", "string", claim["value"]));
+                    claim["name"] = parameterName_ClaimName;
+                    claim["value"] = parameterName_ClaimValue;
+                }
+            }
+
+            return accessCtrlDefinition;
+        }
+
+        private string ToParameterString(string parameterName)
+        {
+            return $"[parameters('{parameterName}')]";
         }
 
         private async Task<JToken> handleDiagnosticSettings(JObject definition)
@@ -686,6 +740,11 @@ namespace LogicAppTemplate
                         inputs["uri"] = $"[parameters('{AddTemplateParameter(action.Name + "-Uri", "string", inputs.Value<string>("uri"))}')]";
                     }
                 }
+                else if (type == "apiconnection" && isSharepointAction(action))
+                {
+                    var inputs = action.Value.Value<JObject>("inputs");
+                    inputs["path"] = ParameterizeJObjectProperty(inputs, action, "path");
+                }
                 else
                 {
                     var api = action.Value.SelectToken("inputs.host.api");
@@ -907,6 +966,12 @@ namespace LogicAppTemplate
 
                                     break;
                                 }
+                            case "sharepointonline":
+                                {
+                                    var inputs = trigger.Value.Value<JObject>("inputs");
+                                    inputs["path"] = ParameterizeJObjectProperty(inputs , trigger, "path");
+                                    break;
+                                }
                             case "azureeventgrid":
                                 {
                                     var ri = new AzureResourceId(trigger.Value["inputs"]["body"]["properties"].Value<string>("topic"));
@@ -1045,6 +1110,83 @@ namespace LogicAppTemplate
 
 
             return definition;
+        }
+
+        private string ParameterizeJObjectProperty(JObject? subject, JProperty triggerOrAction, string propertyName)
+        {
+            var path = subject.Value<string>(propertyName).Replace("'", "''");
+
+            var pathSegments = tokenizePath(path).ToArray();
+
+            path = parameterizeSpecificSegment(triggerOrAction, path, pathSegments, "datasets", "-siteUrl");
+            path = parameterizeSpecificSegment(triggerOrAction, path, pathSegments, "tables", "-libraryGuid");
+
+            path = "[concat('" + path + "')]";
+
+            return path;
+        }
+
+        private string parameterizeSpecificSegment(JProperty actionOrTrigger, string path, string[] pathSegments, string segmentName, string parameterSuffix)
+        {
+            var segmentIndex = Array.FindIndex(pathSegments, pathsubset => pathsubset == segmentName);
+
+            if (segmentIndex >= pathSegments.Length)
+            {
+                return path;
+            }
+
+            if(pathSegments[segmentIndex + 1].Contains("parameters(")){
+                // already parameterized
+                return path;
+            }
+
+            var m = Regex.Match(pathSegments[segmentIndex+1], @"\(''(.*)''\)");
+
+            if (m.Groups.Count > 1)
+            {
+                var datasetName = m.Groups[1].Value;
+                var param = AddTemplateParameter(actionOrTrigger.Name + parameterSuffix, "string", datasetName);
+                path = path.Replace($"''{datasetName}''", $"', parameters('__apostrophe'), parameters('{param}'), parameters('__apostrophe'), '");
+                AddTemplateParameter("__apostrophe", "string", "'");
+            }
+
+            return path;
+        }
+
+        private bool isSharepointAction(JProperty action)
+        {
+            return action.Value.SelectToken("inputs.host.connection.name").Value<String>().Contains("sharepointonline");
+        }
+
+        private List<string> tokenizePath(string? path)
+        {
+            List<string> parts = new List<string>();
+            int lastSplit = 0;
+            int braceCount = 0;
+            for (int i = 0; i < path.Length; i++)
+            {
+                char c = path[i];
+                if (c == '{')
+                    braceCount++;
+                else if (c == '}')
+                    braceCount--;
+
+                if (c == '/' && braceCount == 0)
+                {
+                    if (lastSplit != i)
+                    {
+                        parts.Add(path.Substring(lastSplit, i - lastSplit).Trim('/'));
+                    }
+                    lastSplit = i;
+                }
+            }
+
+            if (lastSplit < path.Length)
+            {
+                parts.Add(path.Substring(lastSplit).Trim('/'));
+            }
+
+            return parts;
         }
 
         private string AddParameterForMetadataBase64(JObject action, string parametername, string currentValue)

@@ -1,0 +1,68 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+    <IsTrimmable>False</IsTrimmable>
+    <IsAotCompatible>False</IsAotCompatible>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+    <IsTrimmable>False</IsTrimmable>
+    <IsAotCompatible>False</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Remove="Cmdlets\Acne.LogicApps.psm1" />
+    <None Remove="Cmdlets\Export-LogicApps.psm1" />
+    <None Remove="Cmdlets\Export-LogicAppWorkflowsARMTemplates.ps1" />
+    <None Remove="Cmdlets\Get-IntegrationAccountMapTemplate.ps1" />
+    <None Remove="Cmdlets\Get-RGLogicAppsTemplate.ps1" />
+    <None Remove="Cmdlets\README.md" />
+    <None Remove="docs\en-US\LogicAppTemplate.dll-Help.xml" />
+    <None Remove="Templates\integrationAccountMap.json" />
+    <None Remove="Templates\nestedTemplateResource.json" />
+    <None Remove="Templates\nestedTemplateShell.json" />
+    <None Remove="Templates\paramTemplate.json" />
+    <None Remove="Templates\starterTemplate.json" />
+    <None Remove="Templates\VSProject\Deploy-AzureResourceGroup.ps1" />
+    <None Remove="Templates\VSProject\Deployment.targets" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Cmdlets\Acne.LogicApps.psm1">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="docs\en-US\LogicAppTemplate.dll-Help.xml" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Templates\integrationAccountMap.json" />
+    <EmbeddedResource Include="Templates\nestedTemplateResource.json" />
+    <EmbeddedResource Include="Templates\nestedTemplateShell.json" />
+    <EmbeddedResource Include="Templates\paramTemplate.json" />
+    <EmbeddedResource Include="Templates\starterTemplate.json" />
+    <EmbeddedResource Include="Templates\VSProject\Deploy-AzureResourceGroup.ps1" />
+    <EmbeddedResource Include="Templates\VSProject\Deployment.targets" />
+    <EmbeddedResource Include="Templates\VSProject\DeployProjectTemplate.deployproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Identity.Client" Version="4.61.3" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="System.Management.Automation" Version="7.4.1" />
+    <PackageReference Include="System.Runtime.Caching" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Cmdlets\README.md">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>
